@@ -754,6 +754,16 @@ const char *rte_get_tx_ol_flag_name(uint64_t mask);
 #define	RTE_MBUF_DEFAULT_BUF_SIZE	\
 	(RTE_MBUF_DEFAULT_DATAROOM + RTE_PKTMBUF_HEADROOM)
 
+#ifdef RTE_LIBRTE_MBUF_DEBUG
+/**
+ * Magic number used to detect double free of mbufs.
+ * When an mbuf is freed (refcnt becomes 0), this magic number is stored
+ * in the udata64 field. If we attempt to free the same mbuf again,
+ * we can detect it by checking for this magic value.
+ */
+#define RTE_MBUF_FREED_MAGIC 0xDEADBEEFFEEDFACEULL
+#endif
+
 /* define a set of marker types that can be used to refer to set points in the
  * mbuf */
 typedef void    *MARKER[0];   /**< generic marker for a point in a structure */
@@ -1154,6 +1164,11 @@ static inline struct rte_mbuf *rte_mbuf_raw_alloc(struct rte_mempool *mp)
 	rte_mbuf_refcnt_set(m, 1);
 	__rte_mbuf_sanity_check(m, 0);
 
+#ifdef RTE_LIBRTE_MBUF_DEBUG
+	/* Clear the freed magic marker since this mbuf is now allocated */
+	m->udata64 = 0;
+#endif
+
 	return m;
 }
 
@@ -1169,6 +1184,19 @@ static inline void __attribute__((always_inline))
 __rte_mbuf_raw_free(struct rte_mbuf *m)
 {
 	RTE_ASSERT(rte_mbuf_refcnt_read(m) == 0);
+
+#ifdef RTE_LIBRTE_MBUF_DEBUG
+	/* Check if this mbuf was already freed (double free detection) */
+	if (unlikely(m->udata64 == RTE_MBUF_FREED_MAGIC)) {
+		rte_panic("Double free detected for mbuf %p from pool %s\n"
+			  "This mbuf was already freed and is being freed again!\n",
+			  m, m->pool ? m->pool->name : "unknown");
+	}
+
+	/* Mark this mbuf as freed by setting the magic number */
+	m->udata64 = RTE_MBUF_FREED_MAGIC;
+#endif
+
 	rte_mempool_put(m->pool, m);
 }
 
@@ -1574,6 +1602,24 @@ static inline struct rte_mbuf* __attribute__((always_inline))
 __rte_pktmbuf_prefree_seg(struct rte_mbuf *m)
 {
 	__rte_mbuf_sanity_check(m, 0);
+
+#ifdef RTE_LIBRTE_MBUF_DEBUG
+	/* Check if this mbuf was already freed (double free detection) */
+	if (unlikely(m->udata64 == RTE_MBUF_FREED_MAGIC)) {
+		rte_panic("Double free detected for mbuf %p from pool %s\n"
+			  "Attempting to free an mbuf that was already freed!\n"
+			  "This likely indicates a use-after-free or double-free bug.\n",
+			  m, m->pool ? m->pool->name : "unknown");
+	}
+
+	/* Additional check: refcnt should never be 0 at this point */
+	if (unlikely(rte_mbuf_refcnt_read(m) == 0)) {
+		rte_panic("Double free detected for mbuf %p from pool %s\n"
+			  "Refcnt is already 0 before decrement! This mbuf should "
+			  "already be in the pool.\n",
+			  m, m->pool ? m->pool->name : "unknown");
+	}
+#endif
 
 	if (likely(rte_mbuf_refcnt_update(m, -1) == 0)) {
 		/* if this is an indirect mbuf, it is detached. */
