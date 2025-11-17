@@ -1,1 +1,6 @@
 doc/guides/nics/overview_table.txt
+
+# Build directories
+build/
+*/build/
+x86_64-*/
